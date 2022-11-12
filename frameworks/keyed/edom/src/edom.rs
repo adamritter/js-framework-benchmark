@@ -1,9 +1,38 @@
+
 extern crate console_error_panic_hook;
 extern crate smallstr;
 
 use web_sys;
 use std::{collections::{HashSet, HashMap}};
 use std::panic;
+
+struct CachedValue<T> {
+    value: std::cell::UnsafeCell<Option<T>>
+}
+
+impl<T> CachedValue<T> {
+    fn new(v:Option<T>)->Self {
+        Self {value: std::cell::UnsafeCell::new(v)}
+    }
+    fn get<'a,F>(&self, f : F)->&'a T where F:FnOnce()->T {
+        let v=unsafe {&mut *self.value.get()};
+        if v.is_none() {
+            *v=Some(f());
+        }
+        return v.as_ref().unwrap();
+    }
+    fn is_none(&self)->bool {
+        unsafe {&mut *self.value.get()}.is_none()
+    }
+    fn unwrap<'a>(&self)->&'a T {
+        let v=unsafe {&mut *self.value.get()};
+        if v.is_none() {
+            panic!("Couldn't get cached value");
+        }
+        return v.as_ref().unwrap();
+    }
+}
+
 
 fn add_offset(big_indexer: usize, delta: isize) -> Option<usize> {
     if delta < 0 {
@@ -15,7 +44,7 @@ fn add_offset(big_indexer: usize, delta: isize) -> Option<usize> {
 trait TextNode {
     fn new(text: &str)->Self;
 }
-struct NoopTextNode  {
+pub struct NoopTextNode  {
     text: String
 }
 impl TextNode for NoopTextNode {
@@ -23,8 +52,8 @@ impl TextNode for NoopTextNode {
         Self { text: text.to_string() }
     }
 }
-struct NoopElementNode {
-    tag: &'static str
+pub struct NoopElementNode {
+    pub tag: &'static str
 }
 
 trait Document {
@@ -33,10 +62,12 @@ trait Document {
     fn create_text_node(&self, text: &str)->Self::TextNode;
     fn new()->Self;
     fn create_element(&self, tag: &'static str)->Self::ElementNode;
+    fn log_1(s: &str);
+    fn log_2(s: &str, s2: &str);
 
 }
 
-struct NoopDocument {
+pub struct NoopDocument {
 }
 impl Document for NoopDocument {
     type TextNode=NoopTextNode;
@@ -50,12 +81,64 @@ impl Document for NoopDocument {
     fn create_element(&self, tag: &'static str)->Self::ElementNode {
         NoopElementNode {tag}
     }
+    fn log_1(s: &str) {
+        println!("{}", s);
+    }
+    fn log_2(s: &str, s2: &str) {
+        println!("{} {}", s, s2);
+    }
+
 }
+
+trait EventHandler {
+    type ElementNode:ElementNode;
+    fn new(fire_event: Rc<RefCell<Box<dyn FnMut(u64, String)>>>)->Self;
+    fn create_event_listener(&self, e: &Self::ElementNode, name: String);
+}
+
+pub struct WasmEventHandler {
+    closure: Closure<dyn FnMut(web_sys::Event)>
+}
+impl EventHandler for WasmEventHandler {
+    type ElementNode = web_sys::Element;
+    fn new(fire_event: Rc<RefCell<Box<dyn FnMut(u64, String)>>>)->Self {
+        let closure=Closure::wrap(Box::new(move |e: web_sys::Event| {
+            let el : web_sys::Element=e.target().unwrap().dyn_into().unwrap();
+            web_sys::console::log_2(&"in event handler data-uid string=".to_string().into(), &el.get_attribute("data-uid").unwrap().to_string().into());
+            let uid:u64=el.get_attribute("data-uid").unwrap().parse::<u64>().unwrap();
+            let name=e.type_();
+            web_sys::console::log_2(&"in event handler e=".to_string().into(), &e.type_().into());
+            web_sys::console::log_2(&"in event handler data-uid=".to_string().into(), &uid.to_string().into());
+
+        ((*fire_event).borrow_mut())(uid, name.to_string());
+            e.prevent_default();
+        })  as Box<dyn FnMut(_)>);
+        Self {closure}
+    }
+    fn create_event_listener(&self, e: &Self::ElementNode, name: String) {
+        e.add_event_listener_with_callback(name.as_str(), self.closure.as_ref().unchecked_ref());
+    }
+}
+
+pub struct NoopEventHandler {
+}
+
+impl EventHandler for NoopEventHandler {
+    type ElementNode=NoopElementNode;
+    fn new(fire_event: Rc<RefCell<Box<dyn FnMut(u64, String)>>>)->Self {
+        Self {}
+    }
+    fn create_event_listener(&self, e: &Self::ElementNode, name: String) {
+    }
+}
+
+
 
 impl Document for web_sys::Document {
     type TextNode=web_sys::Text;
     type ElementNode=web_sys::Element;
     fn new()->Self {
+        panic::set_hook(Box::new(console_error_panic_hook::hook));
         let window = web_sys::window().unwrap();
         window.document().unwrap()
     }
@@ -65,6 +148,12 @@ impl Document for web_sys::Document {
     
     fn create_element(&self, tag: &'static str)->web_sys::Element {
         self.create_element(tag).unwrap()
+    }
+    fn log_1(s: &str) {
+        web_sys::console::log_1(&s.into());
+    }
+    fn log_2(s: &str, s2: &str) {
+        web_sys::console::log_2(&s.into(), &s2.into());
     }
 }
 
@@ -93,7 +182,7 @@ impl GenericNode for web_sys::Node {
     }
 }
 
-struct NoopNode {
+pub struct NoopNode {
 }
 
 impl GenericNode for NoopNode {
@@ -111,6 +200,7 @@ pub trait ElementNode : Sized {
     type GenericNode : GenericNode<TextNode=Self::TextNode, ElementNode=Self>;
     type TextNode : TextNode;
     type Document : Document<TextNode=Self::TextNode, ElementNode=Self>;
+    type EventHandler : EventHandler<ElementNode=Self>;
     fn replace_text_child(&self, new: &Self::TextNode, old: &Self::TextNode);
     fn append_child(&self, child: &Self);
     fn append_child_before(&self, child: &Self, next_sibling: &Self);
@@ -124,6 +214,9 @@ pub trait ElementNode : Sized {
     fn create_event_listener(&self, f : Rc<RefCell<dyn FnMut(u64, &'static str)>>, uid:u64, name:&'static str);
     fn deep_clone(&self)->Self;
     fn get_child_nodes(&self)->Vec<Self::GenericNode>;
+    fn get_child_node(&self, i:u32)->Self::GenericNode;
+    fn set_text_content(&self, s:&str);
+
 }
 
 use wasm_bindgen::prelude::*;
@@ -136,6 +229,7 @@ impl ElementNode for web_sys::Element {
     type TextNode = web_sys::Text;
     type Document = web_sys::Document;
     type GenericNode = web_sys::Node;
+    type EventHandler = WasmEventHandler;
     fn replace_text_child(&self, new: &Self::TextNode, old: &Self::TextNode) {
         self.replace_child(new, old);
     }
@@ -172,6 +266,8 @@ impl ElementNode for web_sys::Element {
     fn create_event_listener(&self, f : Rc<RefCell<dyn FnMut(u64, &'static str)>>, uid:u64, name:&'static str) {
         let closure = Closure::wrap(Box::new(move |e: Event| {
             web_sys::console::log_2(&uid.to_string().into(), &name.into());
+            web_sys::console::log_2(&"e=".to_string().into(), &e.type_().into());
+
             f.borrow_mut()(uid, name);
             e.prevent_default();
         })  as Box<dyn FnMut(_)>);
@@ -191,18 +287,31 @@ impl ElementNode for web_sys::Element {
         r
     }
 
-    
+    fn get_child_node(&self, i: u32)->Self::GenericNode {
+        let this_node : &web_sys::Node = self.as_ref();
+        if i==0 {
+            return this_node.first_child().unwrap();
+        }
+        let node_list = this_node.child_nodes();
+        node_list.get(i).unwrap()
+    }
+    fn set_text_content(&self, s:&str) {
+        web_sys::Node::set_text_content(self, Some(s));
+    }
+
 }
 impl  ElementNode for NoopElementNode {
     type TextNode=NoopTextNode;
     type Document=NoopDocument;
     type GenericNode=NoopNode;
+    type EventHandler=NoopEventHandler;
     fn new(tag: &'static str)->Self {
         Self { tag }
     } 
     fn create_event_listener(&self, f : Rc<RefCell<dyn FnMut(u64, &'static str)>>, uid:u64, name:&'static str) {
     }
-
+    fn set_text_content(&self, s:&str) {
+    }
     fn replace_text_child(&self, new: &NoopTextNode, old: &NoopTextNode) {
     }
     fn append_child(&self, child: &NoopElementNode) {
@@ -234,9 +343,11 @@ impl  ElementNode for NoopElementNode {
     fn get_child_nodes(&self)->Vec<Self::GenericNode> {
         Vec::new()
     }
+    fn get_child_node(&self, i:u32)->Self::GenericNode {
+        NoopNode {}
+    }
 
 }
-static mut last_uid:u64=0;
 impl NoopDocument {
     fn create_element(tag: &'static str)->NoopElementNode {
         NoopElementNode { tag }
@@ -244,55 +355,49 @@ impl NoopDocument {
     fn create_text_node(text: String)->NoopTextNode {
         NoopTextNode {  text }
     }
-    fn next_uid()->u64 {
-        unsafe {
-        let r=last_uid;
-        last_uid+=1;
-        return r;}
-    }
     fn create_event_listener(dnode:&NoopElementNode, uid:u64, name:&'static str) {
     }
 }
 
 enum Node<EN> where EN:ElementNode {
-    Text(String, EN::TextNode),
+    Text(String, Option<EN::TextNode>),
     Element(Element<EN>),
     ForEach(Vec<(u64, Element<EN>)>)
-}
-
-// TODO: speed up web framework by not creating JS DOM elements unless needed.
-enum DNode<'a, EN> where EN:ElementNode {
-    JSRef(EN),
-    ParentRef(&'a Element<EN>, usize)
 }
 
 struct Element<EN> where EN:ElementNode {
     name: &'static str,
     attr: Vec<(&'static str,String)>,
     children: Vec<Node<EN>>,
-    dnode: EN,
+    dnode: CachedValue<EN>,
     events: Vec<&'static str>,
     uid: u64,
 }
 
 impl<EN> Element<EN>  where EN:ElementNode {
-    fn new(name: &'static str, dnode: EN, uid: u64)->Self {
-        Self {name, attr:vec![], children: vec![], dnode, events: Vec::new(), uid}
+    fn new(name: &'static str, dnode: Option<EN>, uid: u64)->Self {
+        Self {name, attr:vec![], children: vec![], dnode: CachedValue::new(dnode), events: Vec::new(), uid}
+    }
+    fn create_event_listener(&self, name: &'static str, edom: &EDOM<EN>, dnode: &EN) {
+        dnode.set_attribute("data-uid", self.uid.to_string().as_str());
+        edom.event_handler.create_event_listener(dnode, name.to_string());
+        // dnode.create_event_listener(edom.fire_event.clone(), self.uid, name);
     }
     fn clone_using_dnode(&self, target_dnode: EN, edom: &mut EDOM<EN>)->Self {
-        let mut r = Self {name: self.name, attr: self.attr.clone(), children: Vec::new(), dnode: target_dnode, events: self.events.clone(), uid: edom.next_uid()};
+        let mut r = Self {name: self.name, attr: self.attr.clone(), children: Vec::new(), dnode: CachedValue::new(Some(target_dnode)), events: self.events.clone(), uid: edom.next_uid()};
         // TODO: attach events
+        let rdnode=r.dnode.get(|| panic!("Should exist"));
         for event_name in &self.events {
-            r.dnode.create_event_listener(edom.fire_event.clone(), r.uid, event_name);
+            self.create_event_listener(event_name, edom, rdnode);
         }
         // TODO: attach children
         let mut next_child_idx=0;
-        let new_dchildren=r.dnode.get_child_nodes();
+        let new_dchildren=rdnode.get_child_nodes();
         for new_dchild in new_dchildren.into_iter() {
             let child = &self.children[next_child_idx];
             match child {
                 Node::Text(s, _)=>{
-                    r.children.push(Node::Text(s.clone(), new_dchild.into_text_node()));
+                    r.children.push(Node::Text(s.clone(), Some(new_dchild.into_text_node())));
                 },
                 Node::Element(e)=>{
                     r.children.push(Node::Element(e.clone_using_dnode(new_dchild.into_element_node(), edom)));
@@ -305,52 +410,104 @@ impl<EN> Element<EN>  where EN:ElementNode {
         }
         r
     }
+
+    fn shallow_clone(&self, target_dnode: Option<EN>, edom: &mut EDOM<EN>)->Self {
+        Self {name: self.name, attr: self.attr.clone(), children: Vec::new(), dnode: CachedValue::new(target_dnode), events: self.events.clone(), uid: edom.next_uid()}
+    }
+
+    fn partial_clone_using_dnode(&self, target_iterator: ElementIterator<EN>) {
+        // Attach events
+        for event_name in &self.events {
+            target_iterator.element.create_event_listener(event_name, target_iterator.edom, target_iterator.get_dnode());
+        }
+        // Attach children
+        let mut i=0;
+        for child in &self.children {
+            let new_elem=match child {
+                Node::Text(s, _)=>Node::Text(s.clone(), None),
+                Node::Element(e)=> {
+                    let mut new_elem=e.shallow_clone(None, target_iterator.edom);
+                    let ctarget_iterator : *const ElementIterator<EN>=&target_iterator;
+                    let it=ElementIterator::new(target_iterator.edom, &mut new_elem, i, Some(ctarget_iterator));
+                    e.partial_clone_using_dnode(it);
+                    Node::Element(new_elem)
+                }
+                _ => {
+                    panic!("Only cloning element and text is supported so far");
+                }
+            };
+            target_iterator.element.children.push(new_elem);
+            i+=1;
+        }
+    }
+    
 }
 
-
-
-pub struct ElementIterator<'a, EN> where EN: ElementNode {
-    edom: &'a mut EDOM<EN>,
-    element: &'a mut Element<EN>,
+pub struct ElementIterator<'d, 'e, EN> where EN: ElementNode {
+    edom: &'d mut EDOM<EN>,
+    element: &'e mut Element<EN>,
     attrpos: usize,
     childpos: usize,
     eventpos: usize,
+    parent_access_pos: usize,
+    parent_iterator: Option<*const ElementIterator<'d, 'd, EN>>
 }
 
-impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
-    fn element_with<'z, F>(&'z mut self, name : &'static str, mut f:F) where F:FnMut(ElementIterator<'z,EN>) {
-       f(self.element(name));
+impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:ElementNode {
+    fn create_element_iterator(&'f mut self, child_pos: usize)->ElementIterator<'f, 'f, EN> {
+        let cself : *const ElementIterator<EN>=self;
+        let Node::Element(element)=&mut self.element.children[child_pos] else {
+            panic!("Not Element")
+        };
+        ElementIterator {edom: self.edom, element: element, attrpos: 0, childpos: 0, eventpos: 0, parent_access_pos: child_pos, parent_iterator: Some(cself)}
     }
-    fn new(edom:&'a mut EDOM<EN>, element:&'a mut Element<EN>)->Self {
-        Self {edom, element, attrpos: 0, childpos: 0, eventpos: 0}
-    }
-    pub fn element<'z>(&'z mut self, name : &'static str)->ElementIterator<'z,EN> {
-        let mut edom=&mut self.edom;
-        let element=&mut self.element;
-        if edom.create {
-            let mut elem= Element::new(name, edom.document.create_element(name), edom.next_uid());
-            element.dnode.append_child(&elem.dnode);
-            element.children.push(Node::Element(elem));
-            if let Node::Element(elem2)= element.children.last_mut().unwrap() {
-                let mut iterator=ElementIterator::new(edom, elem2);
-                return iterator;
-            } else {
-                panic!("???")
-            }
+    pub fn element(&'f mut self, name : &'static str)->ElementIterator<'f, 'f, EN> {
+        let new_pos= if self.edom.create {
+            self.get_dnode();
+            let dnode=self.element.dnode.unwrap();
+            let children=&mut self.element.children;
+            let elem= Element::new(name, Some(self.edom.document.create_element(name)), self.edom.next_uid());
+            dnode.append_child(&elem.dnode.get(||panic!("Dnode empty")));
+            let i = children.len();
+            children.push(Node::Element(elem));
+            i
         } else {
-            if let Node::Element(child)=&mut element.children[self.childpos] {
-                self.childpos+=1;
-                let mut iterator=ElementIterator::new(edom, child);
-                return iterator;
-            } else {
-                panic!("Not Element")
-            }
-        }
+            let i=self.childpos;
+            self.childpos+=1;
+            i
+        };
+        self.create_element_iterator(new_pos)
+    }
+    fn element_with<F>(&'d mut self, name : &'static str, mut f:F) where F:FnMut(ElementIterator<EN>) {
+        f(self.element(name));
+     }
+     pub fn button(&'f mut self, text: &str)->ElementIterator<'f,'f,EN> {
+        let mut elem=self.element("button");
+        elem.text(text);
+        elem
+    }
+    pub fn div<FCB>(&'f mut self, mut fcb: FCB)->ElementIterator<'f,'f,EN> where FCB:FnMut(&mut ElementIterator<EN>) {
+        let mut r=self.element("div");
+        fcb(&mut r);
+        return r;
+    }
+    pub fn h1(&'f mut self)->ElementIterator<'f,'f,EN> {
+        self.element("h1")
+    }
+    fn new(edom:&'d mut EDOM<EN>, element:&'e mut Element<EN>, parent_access_pos: usize, parent_iterator: Option<*const ElementIterator<'d ,'d,EN>>)->ElementIterator<'d,'e,EN> {
+         ElementIterator {edom, element, attrpos: 0, childpos: 0, eventpos: 0, parent_access_pos, parent_iterator}
+     }
+    fn get_dnode2(dnode: &'a CachedValue<EN>, parent_iterator: &Option<*const ElementIterator<EN>>, parent_access_pos: usize)->&'a EN {
+        dnode.get(|| unsafe {(&**parent_iterator.as_ref().unwrap())}.get_dnode().get_child_node(parent_access_pos as u32).into_element_node())
+    }
+    fn get_dnode(&self)->&EN {
+        Self::get_dnode2(&self.element.dnode, &self.parent_iterator, self.parent_access_pos)
+        // self.element.dnode.get(|| unsafe {(&**self.parent_iterator.as_ref().unwrap())}.get_dnode().get_child_node(self.parent_access_pos as u32).into_element_node())
     }
 
-    pub fn attr<'z>(&'z mut self, name: &'static str, value: &str)->&'z mut ElementIterator<'a,EN> {
+    pub fn attr(&'f mut self, name: &'static str, value: &str)->&'f mut ElementIterator<'d,'e,EN> {
         if self.edom.create {
-            self.element.dnode.set_attribute(name, value);
+            self.get_dnode().set_attribute(name, value);
             self.element.attr.push((name, value.into()));
         } else { 
             let thisattr=&mut self.element.attr[self.attrpos];
@@ -358,7 +515,7 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
                 panic!("name change")
             }
             if thisattr.1 != value {
-                self.element.dnode.set_attribute(name, value)
+                self.get_dnode().set_attribute(name, value)
             }
             self.attrpos+=1
         }
@@ -366,31 +523,51 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
     }
     
     pub fn text(&mut self, text:&str) {
+        let use_set_text_content = true;
         if self.edom.create {
-            let tdnode=self.edom.document.create_text_node(text);
-            self.element.dnode.append_text_child(&tdnode);
-            let mut elem=Node::Text(text.into(), tdnode);
-            self.element.children.push(elem);
+            if (use_set_text_content && self.element.children.len()==0) {
+                self.get_dnode().set_text_content(text);
+                self.element.children.push(Node::Text(text.into(), None));
+
+            } else {
+                let tdnode=self.edom.document.create_text_node(text);
+                self.get_dnode().append_text_child(&tdnode);
+                let mut elem=Node::Text(text.into(), Some(tdnode));
+                self.element.children.push(elem);
+            }
         } else {
+            let n=self.element.children.len();
             let mut elem = &mut self.element.children[self.childpos];
-            self.childpos+=1;
             if let Node::Text(text2, tdnode)=elem {
                 if *text != **text2 {
+                    Self::get_dnode2(&self.element.dnode, &self.parent_iterator, self.parent_access_pos);
+                    let dnode=self.element.dnode.unwrap();
                     *text2=text.into();
-                    let mut newChild=self.edom.document.create_text_node(text);
-                    self.element.dnode.replace_text_child(&newChild, &tdnode);
-                    *tdnode=newChild;
+                    if n==1 && use_set_text_content {
+                        *tdnode=None;
+                        dnode.set_text_content(text);
+                    } else {
+                        let mut newChild=self.edom.document.create_text_node(text);
+                        if tdnode.is_none() {
+                            *tdnode=Some(dnode.get_child_node(self.childpos as u32).into_text_node());
+                        }
+                        dnode.replace_text_child(&newChild, tdnode.as_ref().unwrap());
+                        *tdnode=Some(newChild);
+                    }
                 }
             } else {
                 panic!("Not text");
             }
+            self.childpos+=1;
         }
     }
-    fn event<'z,F>(&'z mut self, name:&'static str, mut f: F)->&'z mut Self where F:FnMut() {
+    fn event<F>(&'f mut self, name:&'static str, mut f: F)->&'f mut Self where F:FnMut() {
         if self.edom.create {
             self.element.events.push(name);
-            self.element.dnode.create_event_listener(self.edom.fire_event.clone(), self.element.uid, name);
-        } else if let Some(ev) = self.edom.firing_event  {
+            self.element.create_event_listener(name, self.edom, self.get_dnode());
+
+            // self.get_dnode().create_event_listener(self.edom.fire_event.clone(), self.element.uid, name);
+        } else if let Some(ev) = &self.edom.firing_event  {
             if self.element.uid == ev.0 {
                 if *self.element.events[self.eventpos]==*ev.1  {
                     f();
@@ -400,39 +577,31 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
         }
         self
     }
-    pub fn button<'z>(&'z mut self, text: &str)->ElementIterator<'z,EN> {
-        let mut elem=self.element("button");
-        elem.text(text);
-        elem
-    }
-    pub fn id(&mut self, id: &str)->&mut Self {
+    
+    pub fn id(&'f mut self, id: &str)->&'f mut ElementIterator<'d,'e,EN> {
         self.attr("id", id)
     }
-    pub fn class(&mut self, id: &str)->&mut Self {
+    pub fn class(&'f mut self, id: &str)->&'f mut Self {
         self.attr("class", id)
     }
-    pub fn div<'z, FCB>(&'z mut self, mut fcb: FCB)->ElementIterator<'z,EN> where FCB:FnMut(&mut ElementIterator<EN>) {
-        let mut r=self.element("div");
-        fcb(&mut r);
-        return r;
-    }
-    pub fn click<'z, F>(&'z mut self, mut f:F)->&'z mut Self where F:FnMut() {
+   
+    pub fn click<F>(&'c mut self, mut f:F)->&'c mut Self where F:FnMut() {
         self.event("click", f)
     }
-    pub fn clicked(&mut self)->bool {
+    pub fn clicked(&'c mut self)->bool {
         let mut r=false;
         self.event("click", || r=true);
         r
     }
-    pub fn h1<'z>(&'z mut self)->ElementIterator<'z,EN> {
-        self.element("h1")
-    }
     
-    fn for_each_consolidate<'z, FIdx, FCB, I, C>(&'z mut self, list : C, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where C:Iterator<Item=I>, FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+    fn for_each_consolidate<FIdx, FCB, I, C>(&'f mut self, list : C, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where C:Iterator<Item=I>, FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+        let self_ptr : *mut ElementIterator<EN>=self;
+        self.get_dnode();
+        let dnode = self.element.dnode.unwrap();
         let Node::ForEach(v) : &mut Node<EN>=&mut self.element.children[self.childpos] else {
             panic!("Bad node");
         };
-        web_sys::console::log_2(&"consolidate, vlength:".into(), &v.len().to_string().into());
+        EN::Document::log_2("consolidate, vlength:", &v.len().to_string());
 
         // Remove old children from DOM.
         let mut newidxs:HashSet<u64>=HashSet::new();
@@ -446,7 +615,7 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
         }
         for (idx, elem) in v.iter().rev() {
             if !newidxs.contains(&idx) {
-                elem.dnode.remove();
+                elem.dnode.unwrap().remove();  // All foreach elements must be set.
             }
         }
         // Remove old children from v.
@@ -464,8 +633,6 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
         // first_create is slower for some reason
         let first_create=true;
 
-        web_sys::console::log_1(&"in for_each stuff".into());
-
         for (i, mut e) in list2.iter_mut().enumerate() {
             let idx=fidx(&e);
             if let Some(pos)=position.get(&idx).cloned() {
@@ -475,34 +642,36 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
                     wrong_place.insert(idx);
                     wrong_place.insert(v[i].0);
                     v.swap(i, abspos);
-                    // Swap positions of idx and v[i].0
-                    position.insert(idx, *position.get(&v[i].0).unwrap());
-                    position.insert(v[i].0, pos);
+                    // Update positions
+                    position.insert(v[i].0, i);
+                    position.insert(v[abspos].0, abspos);
                 }
                 if wrong_place.contains(&idx) {
                     wrong_place.remove(&idx);
                     if i==0 {
-                        self.element.dnode.prepend_child(&v[i].1.dnode);
+                        dnode.prepend_child(&v[i].1.dnode.unwrap());
                     } else {
-                        self.element.dnode.append_child_after(&v[i].1.dnode, &v[i-1].1.dnode)
+                        dnode.append_child_after(&v[i].1.dnode.unwrap(), &v[i-1].1.dnode.unwrap())
                     }
                 }
                 if first_create {
-                    fcb(&mut e, &mut ElementIterator::new(edom, &mut v[i].1));
+                    let mut it : ElementIterator<EN>=ElementIterator::new(edom, &mut v[i].1, i, Some(self_ptr));
+                    fcb(&mut e, &mut it);
+                    edom=it.edom;
                 } else {
                     create.push(false);
                 }
             } else {
                 // Insert new elem, increase relpos.
-                let mut elem = Element::new(tag, edom.document.create_element(tag), edom.next_uid());
+                let mut elem = Element::new(tag, Some(edom.document.create_element(tag)), edom.next_uid());
 
                 if ! first_create {
                     create.push(true);
 
                     if i == v.len() {
-                        self.element.dnode.append_child(&elem.dnode);
+                        dnode.append_child(&elem.dnode.unwrap());
                     } else {
-                        self.element.dnode.append_child_before(&elem.dnode, &v[i].1.dnode);
+                        dnode.append_child_before(&elem.dnode.unwrap(), &v[i].1.dnode.unwrap());
                     }
                 }
 
@@ -510,17 +679,27 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
                 relpos+=1;
                 if first_create {
                     if i>0 && edom.clone_for_each {
-                        let new_dnode=v[0].1.dnode.deep_clone();
-                        v[i]=(v[i].0, v[0].1.clone_using_dnode(new_dnode, edom));
+                        let new_dnode=v[0].1.dnode.unwrap().deep_clone();
+                        if edom.use_partial_clone {
+                            let last_elem = &v[0].1;
+                            let mut element=last_elem.shallow_clone(Some(new_dnode), edom);
+                            let it=ElementIterator::new(edom, &mut element, i, None);
+                            last_elem.partial_clone_using_dnode(it);
+                            v[i]=(v[i].0, element);
+                        } else {
+                            v[i]=(v[i].0, v[0].1.clone_using_dnode(new_dnode, edom));
+                        }
                     } else {
                         edom.create=true;
-                        fcb(&mut e, &mut ElementIterator::new(edom, &mut v[i].1));
+                        let mut it=ElementIterator::new(edom, &mut v[i].1, i, Some(self_ptr));
+                        fcb(&mut e, &mut it);
+                        edom=it.edom;
                         edom.create=false;
                     }
                     if i+1 == v.len() {
-                        self.element.dnode.append_child(&v[i].1.dnode);
+                        dnode.append_child(&v[i].1.dnode.unwrap());
                     } else {
-                        self.element.dnode.append_child_before(&v[i].1.dnode, &v[i+1].1.dnode);
+                        dnode.append_child_before(&v[i].1.dnode.unwrap(), &v[i+1].1.dnode.unwrap());
                     }
                 }
 
@@ -528,10 +707,12 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
         }
 
         if !first_create {
+            let mut i=0;
             for (mut e, (ie, should_create)) in list2.iter_mut().zip(v.iter_mut().zip(create.iter())) {
                 let elem=&mut ie.1;
                 edom.create=*should_create;
-                let mut it=ElementIterator::new(edom, elem);
+                let mut it=ElementIterator::new(edom, elem,  i, Some(self_ptr));
+                i+=1;
                 fcb(&mut e, &mut it);
                 edom=it.edom;
             }
@@ -540,12 +721,53 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
         self.childpos+=1;
         edom.create=false;
     }
-    
-    pub fn for_each<'z, FIdx, FCB, I, C>(&'z mut self, list : C, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where C:Iterator<Item=I>, FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+
+    fn create_iterator_and_run_callback<'x, FCB, I>(idx: &mut I, edom: &'x mut EDOM<EN>, parent_access_pos: usize, element: &mut Element<EN>, mut fcb: FCB, self_ptr: *mut ElementIterator<'x,'x,EN>) where FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+        let mut it=ElementIterator::new(edom, element, parent_access_pos, Some(self_ptr));
+        fcb(idx, &mut it);
+    }
+
+    fn create_for_each_element<'x, FCB, I>(
+            item: &mut I, mut edom: &'x mut EDOM<EN>, parent_access_pos: usize,
+            mut fcb: FCB, self_ptr: *const ElementIterator<'x, 'x, EN>, 
+            tag: &'static str, last_elem: Option<&Element<EN>>)->Element<EN> where FCB:FnMut(&mut I, &mut ElementIterator<EN>)  {
+        // Create new DOM or clone.
+        let mut element:Element<EN>;
+        if last_elem.is_none() || !edom.clone_for_each {
+            let dnode=edom.document.create_element(tag);
+            let create=edom.create;
+            edom.create=true;
+            element=Element::new(tag, Some(edom.document.create_element(tag)), edom.next_uid());
+            let mut it:ElementIterator<EN>=ElementIterator::new(edom, &mut element, parent_access_pos, Some(self_ptr));
+            fcb(item, &mut it);
+            edom=it.edom;
+            edom.create=create;
+        } else {
+            let new_dnode=last_elem.as_ref().unwrap().dnode.unwrap().deep_clone();
+            let create=edom.create;
+            edom.create=false;
+            if edom.use_partial_clone {
+                element=last_elem.unwrap().shallow_clone(Some(new_dnode), edom);
+                let it=ElementIterator::new(edom, &mut element, parent_access_pos, None);
+                last_elem.unwrap().partial_clone_using_dnode(it);
+            } else {
+                element=last_elem.unwrap().clone_using_dnode(new_dnode, edom);
+            }
+            let mut it:ElementIterator<EN>=ElementIterator::new(edom, &mut element, parent_access_pos, Some(self_ptr));
+            fcb(item, &mut it);
+            edom=it.edom;
+            edom.create=create;
+        };
+        element
+    }
+    pub fn for_each<FIdx, FCB, I, C>(&mut self, list : C, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where C:Iterator<Item=I>, FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+        let mut self_ptr : *mut ElementIterator<EN>=self;
+       
+        self.get_dnode();
         if self.edom.create {
-            web_sys::console::log_1(&"for_each create".into());
             self.element.children.push(Node::ForEach(Vec::new()));
-            let Node::ForEach(v)=self.element.children.last_mut().unwrap() else {
+            let mut element=&mut self.element;
+            let Node::ForEach(v)=element.children.last_mut().unwrap() else {
                 panic!("Not foreach")
             };
             let mut list2=Vec::new();
@@ -554,22 +776,27 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
             }
             let mut s:HashSet<u64>=HashSet::with_capacity(list2.len());
 
-            for l in &list2 {
-                let idx=fidx(&l);
+            let dnode = element.dnode.unwrap();
+            let mut i=0;
+            let mut last_elem:Option<&Element<EN>>=None;
+            // let mut edom =&mut self.edom;
+
+            for mut l in &mut list2 {
+                let idx=fidx(&*l);
                 if !s.insert(idx) {
                     panic!("Idx must be unique.")
                 }
-                let elem=Element::new(tag, self.edom.document.create_element(tag), self.edom.next_uid());
-                v.push((idx, elem))
-            }
-            let mut edom : &'z mut EDOM<EN>=&mut self.edom;
 
-            for (mut l, ve) in std::iter::zip(list2, v.iter_mut()) {
-                let elem=&mut ve.1;
-                self.element.dnode.append_child(&elem.dnode);
-                let mut it: ElementIterator<'z,EN>=ElementIterator {edom: edom, attrpos: 0, childpos: 0, eventpos: 0, element: elem};
-                fcb(&mut l, &mut it);
-                edom=it.edom;
+                let mut elem=Self::create_for_each_element(
+                    l, self.edom, v.len(),
+                    &mut fcb, self_ptr, 
+                    tag, last_elem);
+
+                let elem_dnode=elem.dnode.unwrap();
+                dnode.append_child(elem_dnode);
+                v.push((idx, elem));
+                last_elem=Some(&v.last().unwrap().1);
+                i+=1;
             }
         } else {
             // Algorithm must be fast enough with 1000 new / clear all (0 common) and also with very few differences.
@@ -579,12 +806,16 @@ impl<'a, EN> ElementIterator<'a, EN> where EN:ElementNode {
 }
 
 pub struct EDOM<EN> where EN:ElementNode {
-    firing_event: Option<(u64, &'static str)>,
+    firing_event: Option<(u64, String)>,
     last_uid: u64,
     create: bool,
     document: EN::Document,
-    fire_event: Rc<RefCell<Box<dyn FnMut(u64, &'static str)>>>,
+    fire_event: Rc<RefCell<Box<dyn FnMut(u64, String)>>>,
     clone_for_each: bool,  // Clone node for for_each instead of building up the DOM tree.
+    nodes_attached: u64,
+    use_partial_clone: bool,
+    root: Option<Element<EN>>,
+    event_handler: EN::EventHandler
 }
 
 impl<EN> EDOM<EN> where EN:ElementNode {
@@ -594,43 +825,142 @@ impl<EN> EDOM<EN> where EN:ElementNode {
         return r;
     }
     
-    fn render_once<F>(&mut self, root: &mut Element<EN>, mut f:F) where EN:ElementNode, F:FnMut(ElementIterator<EN>)->() {
-        let ei=ElementIterator::new(self, root);
+    fn render_once<F>(&mut self, mut f:F) where EN:ElementNode, F:FnMut(ElementIterator<EN>) {
+        let mut root=self.root.take();
+        let ei=ElementIterator::new(self, root.as_mut().unwrap(), 0, None);
         f(ei);
+        self.root=root;
         self.create=false;
     }
 
-    pub fn render<F>(tag: &'static str, root: EN, mut f:F) where EN:ElementNode + 'static, F:FnMut(ElementIterator<EN>) + 'static {
-        panic::set_hook(Box::new(console_error_panic_hook::hook));
-        web_sys::console::time();
-        let mut edom : EDOM<EN>=EDOM::new();
-        let mut el=Element::new("body", root, edom.next_uid());
-        edom.render_once(&mut el, &mut f);
+    pub fn render<F>(tag: &'static str, root: EN, mut f:F)->Rc<RefCell<EDOM<EN>>> where EN:ElementNode + 'static, F:FnMut(ElementIterator<EN>) + 'static {
+        let mut el=Element::new("body", Some(root), 0);
+        let mut edom : EDOM<EN>=EDOM::new(el);
+        assert_eq!(0, edom.next_uid());
+        edom.create=true;
+        edom.render_once(&mut f);
+
         let fire_event=edom.fire_event.clone();
         let edomrc : Rc<RefCell<EDOM<EN>>>=Rc::new(RefCell::new(edom));
         let edomrc2=edomrc.clone();
-        *fire_event.borrow_mut()=Box::new(move |a:u64, b:&'static str| {
-            web_sys::console::time();
-            web_sys::console::log_3(&"rc21".into(), &a.to_string().into(), &b.into());
+        *fire_event.borrow_mut()=Box::new(move |a:u64, b:String| {
+            EN::Document::log_2(a.to_string().as_str(), b.as_str());
             let mut edom=edomrc2.borrow_mut();
+            edom.nodes_attached=0;
             edom.firing_event=Some((a, b));
-            edom.render_once(&mut el, &mut f);
+            edom.render_once(&mut f);
             edom.firing_event=None;
-            edom.render_once(&mut el, &mut f);
-            web_sys::console::time_end();
+            edom.render_once(&mut f);
+            EN::Document::log_2("Nodes attached in render:", edom.nodes_attached.to_string().as_str());
         });
-        std::mem::forget(edomrc);
         std::mem::forget(fire_event);
-        web_sys::console::time_end();
-        web_sys::console::log_1(&"Done initial render".into());
-    }
+        edomrc
+   }
 
-    fn new()->Self {
-        let fire_event:Rc<RefCell<Box<dyn FnMut(u64, &'static str)>>>=Rc::new(RefCell::new(Box::new(|a:u64, b:&'static str| web_sys::console::log_3(&"rc".into(), &a.to_string().into(), &b.into()))));
-        EDOM {fire_event, firing_event: None, last_uid: 0, create: true, document:EN::Document::new(), clone_for_each: true}
+    fn new(root: Element<EN>)->Self {
+        let fire_event:Rc<RefCell<Box<dyn FnMut(u64, String)>>>=Rc::new(RefCell::new(Box::new(|a:u64, b:String| web_sys::console::log_3(&"rc".into(), &a.to_string().into(), &b.into()))));
+        let fe2=fire_event.clone();
+        EDOM {fire_event, firing_event: None, last_uid: 0, create: true, document:EN::Document::new(),
+            root: Some(root),
+            nodes_attached: 0,
+            clone_for_each: true, 
+            use_partial_clone: true,
+            event_handler: EN::EventHandler::new(fe2)
+        }
     }
 }
-/*
 
+
+#[test]
+fn test_create() {
+    EDOM::render("body", NoopElementNode {tag:"body"}, move |mut root| {
+        assert_eq!(0, root.element.children.len());
+        root.div(|main|{
+            assert_eq!(0, main.element.children.len());
+            main.id("main");
+            main.div(|container| {
+                container.class("container");
+            });
+            assert_eq!(1, main.element.children.len());
+        });
+        assert_eq!(1, root.element.children.len());
+        let mut table=root.element("tbody");
+        assert_eq!(2, root.element.children.len());
+    });
 }
- */
+
+#[test]
+fn test_nodes_attached() {
+    let nobody=NoopElementNode {tag:"body"};
+    static mut nodes_attached : u64 = 0;
+    println!("test_nodes_attached");
+
+    let edom=EDOM::render("body", nobody, move |mut root| {
+        root.div(|main|{
+            main.id("main");
+            main.div(|container| {
+                container.class("container");
+            });
+        });
+
+        let mut table=root.element("tbody");
+        let v:Vec<u64>=vec![2,5,9];
+
+        table.for_each(v.iter(), |e| **e, "tr", |id, node| {
+            node.text(id.to_string().as_str());
+            node.div(|e| {
+                if e.h1().clicked() {
+
+                }
+            });
+            node.h1();
+        });
+    });
+    let mut edom=(*edom).borrow_mut();
+    let root=edom.root.as_ref().unwrap();
+    assert_eq!("body", root.name);
+    let Node::Element(table)=&root.children[1] else {panic!("No tbody found")};
+    assert_eq!("tbody", table.name);
+    let Node::ForEach(fe)=&table.children[0] else {panic!("No foreach found")};
+    assert_eq!(3, fe.len());
+    let tr=&fe[1].1 else {panic!("No text found")};
+    assert_eq!("tr", tr.name);
+    let Node::Text(s, text_node)=&tr.children[0] else {panic!("No text found")};
+    assert_eq!("5", s);
+    let Node::Element(table_last_h1)=&tr.children[2] else {panic!("No table_div found")};
+    assert!(table_last_h1.dnode.is_none());
+}
+
+
+#[test]
+fn test_swap_rows() {
+    let mut v:Vec<u64>=vec![1,2,3,4];
+    let edom=EDOM::render("body", NoopElementNode {tag:"body"}, move |mut root| {
+        let mut button=root.button("Swap rows");
+        assert_eq!(1, button.element.uid);
+        if button.clicked() {
+            v.swap(1, 2);
+            println!("Swapped rows, v={:?}", v);
+        }
+        let mut table=root.element("tbody");
+        table.for_each(v.iter(), |e| **e, "tr", |id, node| {
+            node.text(id.to_string().as_str());
+            node.div(|e| {
+                if e.h1().clicked() {
+
+                }
+            });
+            node.h1();
+        });
+    });
+    let fire_event=(*edom).borrow_mut().fire_event.clone();
+    fire_event.borrow_mut()(1, "click".to_string());
+    let edom=(*edom).borrow_mut();
+    let root=edom.root.as_ref().unwrap();
+    let Node::Element(table)=&root.children[1] else {panic!("No table")};
+    assert_eq!("tbody", table.name);
+    let Node::ForEach(fe)=&table.children[0] else {panic!("No foreach found")};
+    assert_eq!(3, fe[1].0);
+    let Node::Text(s, _)=&fe[1].1.children[0] else {panic!("No text found")};
+    assert_eq!("3", s);
+}
