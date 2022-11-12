@@ -124,7 +124,7 @@ fn add_table<EN>(mut container: &mut ElementIterator<EN>, v:&mut Vec<(u32, Strin
     let mut tbody=table.element("tbody");
     tbody.id("tbody");
     let mut vremove=None;
-    tbody.for_each(v.iter(), |elem| elem.0 as u64, "tr", |elem, row| {
+    tbody.for_each(v.iter_mut(), |elem| elem.0 as u64, "tr", |elem, row| {
         row.class(if Some(elem.0)==*selected {"danger"} else {""});
         row.element("td").class("col-md-1").text(elem.0.to_string().as_str());
         row.element("td").class("col-md-4")

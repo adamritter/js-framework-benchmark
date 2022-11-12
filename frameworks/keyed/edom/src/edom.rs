@@ -5,6 +5,7 @@ extern crate smallstr;
 use web_sys;
 use std::{collections::{HashSet, HashMap}};
 use std::panic;
+use std::slice::IterMut;
 
 struct CachedValue<T> {
     value: std::cell::UnsafeCell<Option<T>>
@@ -594,7 +595,7 @@ impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:Elemen
         r
     }
     
-    fn for_each_consolidate<FIdx, FCB, I, C>(&'f mut self, list : C, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where C:Iterator<Item=I>, FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+    fn for_each_consolidate<FIdx, FCB, I>(&'f mut self, list : IterMut<I>, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
         let self_ptr : *mut ElementIterator<EN>=self;
         self.get_dnode();
         let dnode = self.element.dnode.unwrap();
@@ -603,23 +604,6 @@ impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:Elemen
         };
         EN::Document::log_2("consolidate, vlength:", &v.len().to_string());
 
-        // Remove old children from DOM.
-        let mut newidxs:HashSet<u64>=HashSet::new();
-        let mut list2=Vec::new();
-        for l in list {
-            list2.push(l);
-        }
-
-        for (_, e) in list2.iter().enumerate() {
-            newidxs.insert(fidx(&e));
-        }
-        for (idx, elem) in v.iter().rev() {
-            if !newidxs.contains(&idx) {
-                elem.dnode.unwrap().remove();  // All foreach elements must be set.
-            }
-        }
-        // Remove old children from v.
-        v.retain(|(idx, _)| newidxs.contains(idx));
         // position[idx]+relpos will contain the position of idx Element for all shown elements in v[ii] where ii>=i.
         let mut position:HashMap<u64, usize>=HashMap::new();
         for (i, (idx, _)) in &mut v.iter().enumerate() {
@@ -632,8 +616,9 @@ impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:Elemen
 
         // first_create is slower for some reason
         let first_create=true;
+        let mut i=0;
 
-        for (i, mut e) in list2.iter_mut().enumerate() {
+        for mut e in list {
             let idx=fidx(&e);
             if let Some(pos)=position.get(&idx).cloned() {
                 let abspos=add_offset(pos, relpos).unwrap();
@@ -677,45 +662,38 @@ impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:Elemen
 
                 v.insert(i, (idx, elem));
                 relpos+=1;
-                if first_create {
-                    if i>0 && edom.clone_for_each {
-                        let new_dnode=v[0].1.dnode.unwrap().deep_clone();
-                        if edom.use_partial_clone {
-                            let last_elem = &v[0].1;
-                            let mut element=last_elem.shallow_clone(Some(new_dnode), edom);
-                            let it=ElementIterator::new(edom, &mut element, i, None);
-                            last_elem.partial_clone_using_dnode(it);
-                            v[i]=(v[i].0, element);
-                        } else {
-                            v[i]=(v[i].0, v[0].1.clone_using_dnode(new_dnode, edom));
-                        }
+                    
+                if i>0 && edom.clone_for_each {
+                    let new_dnode=v[0].1.dnode.unwrap().deep_clone();
+                    if edom.use_partial_clone {
+                        let last_elem = &v[0].1;
+                        let mut element=last_elem.shallow_clone(Some(new_dnode), edom);
+                        let it=ElementIterator::new(edom, &mut element, i, None);
+                        last_elem.partial_clone_using_dnode(it);
+                        v[i]=(v[i].0, element);
                     } else {
-                        edom.create=true;
-                        let mut it=ElementIterator::new(edom, &mut v[i].1, i, Some(self_ptr));
-                        fcb(&mut e, &mut it);
-                        edom=it.edom;
-                        edom.create=false;
+                        v[i]=(v[i].0, v[0].1.clone_using_dnode(new_dnode, edom));
                     }
-                    if i+1 == v.len() {
-                        dnode.append_child(&v[i].1.dnode.unwrap());
-                    } else {
-                        dnode.append_child_before(&v[i].1.dnode.unwrap(), &v[i+1].1.dnode.unwrap());
-                    }
+                } else {
+                    edom.create=true;
+                    let mut it=ElementIterator::new(edom, &mut v[i].1, i, Some(self_ptr));
+                    fcb(&mut e, &mut it);
+                    edom=it.edom;
+                    edom.create=false;
+                }
+                if i+1 == v.len() {
+                    dnode.append_child(&v[i].1.dnode.unwrap());
+                } else {
+                    dnode.append_child_before(&v[i].1.dnode.unwrap(), &v[i+1].1.dnode.unwrap());
                 }
 
             }
+            i+=1;
         }
 
-        if !first_create {
-            let mut i=0;
-            for (mut e, (ie, should_create)) in list2.iter_mut().zip(v.iter_mut().zip(create.iter())) {
-                let elem=&mut ie.1;
-                edom.create=*should_create;
-                let mut it=ElementIterator::new(edom, elem,  i, Some(self_ptr));
-                i+=1;
-                fcb(&mut e, &mut it);
-                edom=it.edom;
-            }
+        while v.len() > i {  // Remove remaining children
+            v.last().unwrap().1.dnode.unwrap().remove();
+            v.pop();
         }
 
         self.childpos+=1;
@@ -760,7 +738,7 @@ impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:Elemen
         };
         element
     }
-    pub fn for_each<FIdx, FCB, I, C>(&mut self, list : C, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where C:Iterator<Item=I>, FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
+    pub fn for_each<FIdx, FCB, I>(&mut self, list : IterMut<I>, mut fidx: FIdx, tag: &'static str, mut fcb: FCB) where FIdx:FnMut(&I)->u64, FCB:FnMut(&mut I, &mut ElementIterator<EN>) {
         let mut self_ptr : *mut ElementIterator<EN>=self;
        
         self.get_dnode();
@@ -781,7 +759,7 @@ impl<'d, 'e, 'f, 'a, 'z, 'c, 'q, EN> ElementIterator<'d, 'e, EN> where EN:Elemen
             let mut last_elem:Option<&Element<EN>>=None;
             // let mut edom =&mut self.edom;
 
-            for mut l in &mut list2 {
+            for mut l in list2 {
                 let idx=fidx(&*l);
                 if !s.insert(idx) {
                     panic!("Idx must be unique.")
@@ -906,7 +884,7 @@ fn test_nodes_attached() {
         let mut table=root.element("tbody");
         let v:Vec<u64>=vec![2,5,9];
 
-        table.for_each(v.iter(), |e| **e, "tr", |id, node| {
+        table.for_each(v.iter_mut(), |e| *e, "tr", |id, node| {
             node.text(id.to_string().as_str());
             node.div(|e| {
                 if e.h1().clicked() {
@@ -943,7 +921,7 @@ fn test_swap_rows() {
             println!("Swapped rows, v={:?}", v);
         }
         let mut table=root.element("tbody");
-        table.for_each(v.iter(), |e| **e, "tr", |id, node| {
+        table.for_each(v.iter_mut(), |e| *e, "tr", |id, node| {
             node.text(id.to_string().as_str());
             node.div(|e| {
                 if e.h1().clicked() {

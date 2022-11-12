@@ -27,7 +27,7 @@ fn todomvc() {
     let mut show_state=ShowState::All;
     let new_text=String::new();
 	let mut editing = None;
-    let mut edit_value = None
+    let mut edit_value = None;
 
     edom::render(|root| {
         local_storage.set_item("todos-edom", serde_json::to_str(todolist));
@@ -38,7 +38,7 @@ fn todomvc() {
                 _ => ShowState::All
             }
         })
-        let num_active = items.iter().skip_while(item => !item.completed).len();
+        let num_active = items.iter_mut().skip_while(item => !item.completed).len();
 
         root.header(|header| {
             header.h1().text("todos");
@@ -87,8 +87,7 @@ fn todomvc() {
                         li.render_if(todo.id == editing, |li2| {
                             li2.input(&mut edit_value).id("edit").class("edit").autofocus(true).on("keydown", |e| {
                                     if (event.which === ENTER_KEY) {
-                                        // todo.description=edit_value; // Change to IterMut.
-                                        finish_edit=true;
+                                        todo.description=edit_value;
                                         editing=None;
                                         e.target.blur();
                                     };
@@ -99,18 +98,14 @@ fn todomvc() {
                                 });
                         })
                     });
-                    if let finish_edit {
-                        for todo in todolist.iter_mut() {
-                            if todo.id == editing {
-                                todo.description=edit_value;
-                            }
-                        }
-                    }
                 });
                 if root.button("clear_completed").clicked() {
                     todolist.retain(|e| !e.completed);
                 }
                 render_footer(root, &mut todolist, num_active);
+                if let Some(remove_id) = remove {
+                    todolist.retain(|e| e.id != remove_id);
+                }
             })
         }
     }
