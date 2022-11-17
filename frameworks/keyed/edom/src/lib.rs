@@ -1,7 +1,6 @@
 #![allow(warnings)]
 use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
-pub mod edom;
-use edom::{ElementIterator, ElementNode};
+use edom::{visitor::Visitor, dom::ElementNode};
 use rand::prelude::*;
 
 const ADJECTIVES: &'static [&'static str] = &[
@@ -46,7 +45,7 @@ pub fn next_line(n: &mut u32, thread_rng: &mut ThreadRng)->(u32, String) {
     r
 }
 
-fn custom_button_clicked<EN>(container: &mut ElementIterator<EN>, text: &str, id: &str)->bool where EN: ElementNode {
+fn custom_button_clicked<EN>(container: &mut Visitor<EN>, text: &str, id: &str)->bool where EN: ElementNode {
     let divclass="col-sm-6 smallpad";
     let btnclass="btn btn-primary btn-block";
     let mut r=false;
@@ -59,7 +58,7 @@ fn custom_button_clicked<EN>(container: &mut ElementIterator<EN>, text: &str, id
     return r;
 }
 
-fn add_jumbotron<EN>(container: &mut ElementIterator<EN>, v:&mut Vec<(u32, String)>,
+fn add_jumbotron<EN>(container: &mut Visitor<EN>, v:&mut Vec<(u32, String)>,
         n: &mut u32, thread_rng: &mut ThreadRng) where EN: ElementNode {
     container.div(|jumbotron| {
         jumbotron.class("jumbotron");
@@ -118,7 +117,7 @@ fn add_jumbotron<EN>(container: &mut ElementIterator<EN>, v:&mut Vec<(u32, Strin
     });
 }
 
-fn add_table<EN>(mut container: &mut ElementIterator<EN>, v:&mut Vec<(u32, String)>, selected: &mut Option<u32>) where EN: ElementNode {
+fn add_table<EN>(mut container: &mut Visitor<EN>, v:&mut Vec<(u32, String)>, selected: &mut Option<u32>) where EN: ElementNode {
     let mut table=container.element("table");
     table.class("table table-hover table-striped test-data");
     let mut tbody=table.element("tbody");
@@ -129,12 +128,12 @@ fn add_table<EN>(mut container: &mut ElementIterator<EN>, v:&mut Vec<(u32, Strin
         row.element("td").class("col-md-1").text(elem.0.to_string().as_str());
         row.element("td").class("col-md-4")
             .element("a").class("lbl")
-                .click(|| *selected=Some(elem.0))
+                .click(|_| *selected=Some(elem.0))
                 .text(elem.1.as_str());
         row.element("td").class("col-md-1")
              .element("a").class("remove")
                 .element("span").class("remove glyphicon glyphicon-remove").attr("aria-hidden", "true")
-                    .click(|| vremove=Some(elem.0))
+                    .click(|_| vremove=Some(elem.0))
                     ;
         row.element("td").class("col-md-6");
     });
@@ -143,7 +142,7 @@ fn add_table<EN>(mut container: &mut ElementIterator<EN>, v:&mut Vec<(u32, Strin
     }
 }
 
-pub fn js_framework_benchmark<EN>(mut root: &mut ElementIterator<EN>, v:&mut Vec<(u32, String)>,  n: &mut u32, thread_rng: &mut ThreadRng,
+pub fn js_framework_benchmark<EN>(mut root: &mut Visitor<EN>, v:&mut Vec<(u32, String)>,  n: &mut u32, thread_rng: &mut ThreadRng,
         selected: &mut Option<u32>) where EN: ElementNode {
     root.div(|main|{
         main.id("main");
@@ -531,9 +530,8 @@ pub fn main_js() -> Result<(), JsValue> {
         // }
         let body = document.body().unwrap();
         let body=web_sys::Element::from(body);
-        let nobody=edom::NoopElementNode {tag:"body"};
 
-        edom::EDOM::render("body", body, move |mut root| {
+        edom::EDOM::render(body, move |mut root| {
             web_sys::console::time();
             js_framework_benchmark(&mut root, &mut v, &mut n, &mut thread_rng, &mut selected);
             web_sys::console::time_end();

@@ -13,7 +13,7 @@ console_error_panic_hook = "*"
 getrandom = {version = "0.2", features = ["js"]}
 rand = {version = "0.8", features = ["small_rng"]}
 smallstr = {version = "0.3.0"}
-# bencher = "0.1.5"
+edom = { path = "../../../../edom" }
 
 [dependencies.web-sys]
 version = "0.3.53"
