@@ -35,10 +35,11 @@ export async function checkElementExists(page: Page, selector: string) {
 }
 
 export async function clickElement(page: Page, selector: string) {
-  let elem = await page.locator(selector);
+  let elem = await page.$(selector);
+    // let elem = await page.locator(selector);
   if (!elem) throw `clickElementByXPath ${selector} failed. Element was not found.`;
   await elem.click();
-  // await elem.dispose();
+  await elem.dispose();
 }
 
 export async function checkElementContainsText(page: Page, selector: string, expectedText: string): Promise<void> {
@@ -86,17 +87,17 @@ function browserPath(benchmarkOptions: BenchmarkDriverOptions) {
   } else if (process.platform == "linux") {
     return "/usr/bin/google-chrome";
   } else if(/^win/i.test(process.platform)) {
-    return 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';    
+    return 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';    
   } else {
     throw new Error("Path to Google Chrome executable must be specified");
   }
 }
 
 export async function startBrowser(benchmarkOptions: BenchmarkDriverOptions): Promise<Browser> {
-  const width = 1280;
-  const height = 800;
-
+  let args = ['--window-size=1000,800', '--js-flags=--expose-gc'];
+  if (benchmarkOptions.headless) args.push('--headless=chrome');
   const browser = await chromium.launch({
+    args,
     headless: false,
     // executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     executablePath: browserPath(benchmarkOptions),

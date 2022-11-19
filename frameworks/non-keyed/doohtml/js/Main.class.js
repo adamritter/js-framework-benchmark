@@ -1,10 +1,10 @@
-'use strict';
+'use strict'
 
-const _random = max => Math.random() * max | 0;
+const _random = max => Math.random() * max | 0
 
-const adjectives = ["pretty", "large", "big", "small", "tall", "short", "long", "handsome", "plain", "quaint", "clean", "elegant", "easy", "angry", "crazy", "helpful", "mushy", "odd", "unsightly", "adorable", "important", "inexpensive", "cheap", "expensive", "fancy"];
-const colours = ["red", "yellow", "blue", "green", "pink", "brown", "purple", "brown", "white", "black", "orange"];
-const nouns = ["table", "chair", "house", "bbq", "desk", "car", "pony", "cookie", "sandwich", "burger", "pizza", "mouse", "keyboard"];
+const adjectives = ["pretty", "large", "big", "small", "tall", "short", "long", "handsome", "plain", "quaint", "clean", "elegant", "easy", "angry", "crazy", "helpful", "mushy", "odd", "unsightly", "adorable", "important", "inexpensive", "cheap", "expensive", "fancy"]
+const colours = ["red", "yellow", "blue", "green", "pink", "brown", "purple", "brown", "white", "black", "orange"]
+const nouns = ["table", "chair", "house", "bbq", "desk", "car", "pony", "cookie", "sandwich", "burger", "pizza", "mouse", "keyboard"]
 
 const lenA = adjectives.length, lenB = colours.length, lenC = nouns.length
 
@@ -27,26 +27,27 @@ Doo.define(
 			this.addEventListeners()
 			this.selectedRow = undefined
 			document.querySelector(".ver").innerHTML += ` ${Doo.version} (non-keyed)`
-			document.title += ` ${Doo.version} (non-keyed)`		}
+			document.title += ` ${Doo.version} (non-keyed)`
+		}
 
 		async dooAfterRender() {
 			this.tbody = this.shadow.querySelector('#tbody')
 			this.shadow.querySelector(this.scrollTarget).addEventListener('click', e => {
-				e.preventDefault();
+				e.preventDefault()
 				if (e.target.parentElement.matches('.remove')) {
-					this.delete(e.target.parentElement);
+					this.delete(e.target.parentElement)
 				} else if (e.target.tagName === 'A') {
-					this.select(e.target);
+					this.select(e.target)
 				}
-			});
+			})
 		}
 	
 		getParentRow(elem) {
         	while (elem) {
         		if (elem.tagName === "TR") {return elem}
-        		elem = elem.parentNode;
+        		elem = elem.parentNode
         	}
-        	return undefined;
+        	return undefined
         }
 
 		buildData(count = 1000) {
@@ -71,14 +72,12 @@ Doo.define(
 				this.tbody.textContent = ''
 			}
 			this.renderTable()
-
 		}
-
 		add() {
-			let startRow = this.data.rows.length
+			let start = this.data.rows.length
 			this.data.rows = this.data.rows.concat(this.buildData())
-			this.renderTable(this.data.rows, startRow)
-		}  
+			this.append(this.data.rows, this.tbody, start)
+		}    
 
 		runLots() {
 			this.data.rows = this.buildData(10000)
@@ -111,37 +110,52 @@ Doo.define(
 			this.tbody.textContent = ''
 		}
 
+		isRowSelected(elem) {
+			return elem.classList.contains('danger')
+		}
 		swapRows() {
-			if (this.data.rows.length>10) {
-				let node1 = this.tbody.childNodes[1]
-				let node2 = this.tbody.childNodes[998]
-
-				let row1 = this.data.rows[1];
-				this.data.rows[1] = this.data.rows[998];
-				this.data.rows[998] = row1
+			const A=1,B=998
+			if (this.data.rows.length > B) {
 				
-				this.tbody.insertBefore(node2, node1)
-				this.tbody.insertBefore(node1, this.tbody.childNodes[999])
+				let a = this.tbody.childNodes[A], 
+					b = this.tbody.childNodes[B],
+					row1 = this.data.rows[1]
+				
+				this.data.rows[A] = this.data.rows[B];
+				this.data.rows[B] = row1
+			
+				const selected1 = this.isRowSelected(a)
+				const selected2 = this.isRowSelected(b)
+				this.updateRow(A, this.data.rows, this.tbody)
+				this.updateRow(B, this.data.rows, this.tbody)
+			
+ 				if (selected1) {
+					this.select(this.tbody.childNodes[B])
+				}
+				if (selected2) 	{
+					this.select(this.tbody.childNodes[A])
+				}
 			}
 		}
 
+
 		addEventListeners() {
 			document.getElementById("main").addEventListener('click', e => {
-				e.preventDefault();
+				e.preventDefault()
 				if (e.target.matches('#runlots')) {
-					this.runLots();
+					this.runLots()
 				} else if (e.target.matches('#run')) {
-					this.run();
+					this.run()
 				} else if (e.target.matches('#add')) {
-					this.add();
+					this.add()
 				} else if (e.target.matches('#update')) {
-					this.update();
+					this.update()
 				} else if (e.target.matches('#clear')) {
-					this.clear();
+					this.clear()
 				} else if (e.target.matches('#swaprows')) {
-					this.swapRows();
+					this.swapRows()
 				}
 			})    
-    	}   
+    	}
 	}
 )

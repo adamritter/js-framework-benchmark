@@ -1,37 +1,21 @@
+import { Browser, CDPSession, Page } from "puppeteer-core";
+import { BenchmarkType } from "./benchmarksCommon";
+import { CPUBenchmarkPuppeteer, fileNameTrace, MemBenchmarkPuppeteer, TBenchmarkPuppeteer, benchmarks } from "./benchmarksPuppeteer";
+import { BenchmarkOptions, config as defaultConfig, ErrorAndWarning, FrameworkData, TConfig } from "./common";
 import { startBrowser } from "./puppeteerAccess";
-
-import { TConfig, config as defaultConfig, FrameworkData, ErrorAndWarning, BenchmarkOptions } from "./common";
-import { Browser, Page } from "puppeteer-core";
-import { BenchmarkType, DurationMeasurementMode } from "./benchmarksCommon";
-import { CPUBenchmarkPuppeteer, MemBenchmarkPuppeteer, fileNameTrace, TBenchmarkPuppeteer } from "./benchmarksPuppeteer";
-import {benchmarks} from "./benchmarkConfiguration";
-import { readFile } from 'fs/promises';
-import * as R from 'ramda';
 import { computeResultsCPU } from "./timeline";
+
 
 let config: TConfig = defaultConfig;
 
 async function runBenchmark(page: Page, benchmark: TBenchmarkPuppeteer, framework: FrameworkData): Promise<any> {
   await benchmark.run(page, framework);
   if (config.LOG_PROGRESS) console.log("after run ", benchmark.benchmarkInfo.id, benchmark.type, framework.name);
-  if (benchmark.type === BenchmarkType.MEM) {
-    await forceGC(page);
-  }
-}
-
-async function afterBenchmark(page: Page, benchmark: TBenchmarkPuppeteer, framework: FrameworkData): Promise<any> {
-  if (benchmark.after) {
-    await benchmark.after(page, framework);
-    if (config.LOG_PROGRESS) console.log("after benchmark ", benchmark.benchmarkInfo.id, benchmark.type, framework.name);
-  }
 }
 
 async function initBenchmark(page: Page, benchmark: TBenchmarkPuppeteer, framework: FrameworkData): Promise<any> {
   await benchmark.init(page, framework);
   if (config.LOG_PROGRESS) console.log("after initialized ", benchmark.benchmarkInfo.id, benchmark.type, framework.name);
-  if (benchmark.type === BenchmarkType.MEM) {
-    await forceGC(page);
-  }
 }
 
 const wait = (delay = 1000) => new Promise((res) => setTimeout(res, delay));
@@ -59,20 +43,17 @@ function convertError(error: any): string {
   }
 }
 
-async function forceGC(page: Page) {
-  const prototypeHandle = await page.evaluateHandle(() => Object.prototype);
-  const objectsHandle = await page.queryObjects(prototypeHandle);
-  const numberOfObjects = await page.evaluate((instances) => instances.length, objectsHandle);
-
-  await Promise.all([prototypeHandle.dispose(), objectsHandle.dispose()]);
-
-  return numberOfObjects;
+async function forceGC(page: Page, client: CDPSession) {
+  for (let i=0;i<7;i++) {
+      // await client.send('HeapProfiler.collectGarbage');
+      await page.evaluate("window.gc()");
+  }
 }
 
 async function runCPUBenchmark(framework: FrameworkData, benchmark: CPUBenchmarkPuppeteer, benchmarkOptions: BenchmarkOptions): Promise<ErrorAndWarning>
 {
-    let error: String = undefined;
-    let warnings: String[] = [];
+    let error: string = undefined;
+    let warnings: string[] = [];
     let results: number[] = [];
 
     console.log("benchmarking ", framework, benchmark.benchmarkInfo.id);
@@ -88,7 +69,12 @@ async function runCPUBenchmark(framework: FrameworkData, benchmark: CPUBenchmark
             });
         // }
         for (let i = 0; i <benchmarkOptions.batchSize; i++) {
-            await page.goto(`http://localhost:${benchmarkOptions.port}/${framework.uri}/index.html`, {waitUntil: "domcontentloaded"});
+            try {
+              await page.goto(`http://${benchmarkOptions.HOST}:${benchmarkOptions.port}/${framework.uri}/index.html`, {waitUntil: "networkidle0"});
+            } catch (ex) {
+              console.log("**** loading benchmark failed, retrying");
+              await page.goto(`http://${benchmarkOptions.HOST}:${benchmarkOptions.port}/${framework.uri}/index.html`, {waitUntil: "networkidle0"});
+            }
 
             // await (driver as any).sendDevToolsCommand('Network.enable');
             // await (driver as any).sendDevToolsCommand('Network.emulateNetworkConditions', {
@@ -125,23 +111,25 @@ async function runCPUBenchmark(framework: FrameworkData, benchmark: CPUBenchmark
             //     'disabled-by-default-devtools.timeline.stack',
             // ];
 
+            const client = await page.target().createCDPSession();
+
             if (benchmark.benchmarkInfo.throttleCPU) {
               console.log("CPU slowdown", benchmark.benchmarkInfo.throttleCPU);
               await page.emulateCPUThrottling(benchmark.benchmarkInfo.throttleCPU);
           }
   
-            await page.tracing.start({path: fileNameTrace(framework, benchmark.benchmarkInfo, i), 
-                screenshots: false,
-                categories:categories
-            });
+          await page.tracing.start({path: fileNameTrace(framework, benchmark.benchmarkInfo, i), 
+            screenshots: false,
+            categories:categories
+          });
+          await forceGC(page, client);
             console.log("runBenchmark");
             // let m1 = await page.metrics();
             await runBenchmark(page, benchmark, framework);
 
-            await wait(10);
+            await wait(40);
             await page.tracing.stop();
             // let m2 = await page.metrics();
-            await afterBenchmark(page, benchmark, framework);
             if (benchmark.benchmarkInfo.throttleCPU) {
               await page.emulateCPUThrottling(1);
           }
@@ -161,27 +149,15 @@ async function runCPUBenchmark(framework: FrameworkData, benchmark: CPUBenchmark
         return {error, warnings};
     } finally {
         try {
-            if (page) {
-                await page.close();
-            }
-        } catch (err) {
-            console.log("ERROR closing page", err);
-        }
-        try {
             if (browser) {
-                await browser.disconnect();
-            }
-        } catch (err) {
-            console.log("ERROR disconnecting browser", err);
-        }
-        try {
-            if (browser) {
+                console.log("*** browser close")
                 await browser.close();
+                console.log("*** browser closed")
             }
         } catch (err) {
             console.log("ERROR cleaning up driver", err);
         }
-
+        console.log("*** browser has been shutting down");
     }
 }
 
@@ -190,23 +166,23 @@ async function runMemBenchmark(
   benchmark: MemBenchmarkPuppeteer,
   benchmarkOptions: BenchmarkOptions
 ): Promise<ErrorAndWarning> {
-  let error: String = undefined;
-  let warnings: String[] = [];
+  let error: string = undefined;
+  let warnings: string[] = [];
   let results: number[] = [];
 
   console.log("benchmarking ", framework, benchmark.benchmarkInfo.id);
   let browser: Browser = null;
   try {
     browser = await startBrowser(benchmarkOptions);
+    const page = await browser.newPage();
     for (let i = 0; i < benchmarkOptions.batchSize; i++) {
-      const page = await browser.newPage();
       if (config.LOG_DETAILS) {
         page.on("console", (msg) => {
           for (let i = 0; i < msg.args().length; ++i) console.log(`BROWSER: ${msg.args()[i]}`);
         });
       }
-
-      await page.goto(`http://localhost:${benchmarkOptions.port}/${framework.uri}/index.html`);
+      
+      await page.goto(`http://${benchmarkOptions.HOST}:${benchmarkOptions.port}/${framework.uri}/index.html`, {waitUntil: "networkidle0"});
 
       // await (driver as any).sendDevToolsCommand('Network.enable');
       // await (driver as any).sendDevToolsCommand('Network.emulateNetworkConditions', {
@@ -217,21 +193,28 @@ async function runMemBenchmark(
       // });
       console.log("initBenchmark");
       await initBenchmark(page, benchmark, framework);
+      const client = await page.target().createCDPSession();
 
       console.log("runBenchmark");
       await runBenchmark(page, benchmark, framework);
+      await forceGC(page, client);
       await wait(40);
-      await forceGC(page);
-      let metrics = await page.metrics();
-
-      await afterBenchmark(page, benchmark, framework);
+      let result = (await page.evaluate("performance.measureUserAgentSpecificMemory()") as any).bytes / 1024 / 1024;
       console.log("afterBenchmark");
-      let result = metrics.JSHeapUsedSize / 1024.0 / 1024.0;
+
       results.push(result);
       console.log(`memory result for ${framework.name} and ${benchmark.benchmarkInfo.id}: ${result}`);
+
+      // await client.send('Performance.enable');
+      // let cdpMetrics = await client.send('Performance.getMetrics');
+      // let response = cdpMetrics.metrics.filter((m) => m.name==='JSHeapUsedSize')[0].value
+      // console.log("Performance.getMetrics", response, response/1024/1024);
+
+      // await wait(10 * 1000 * 1000 * 60);
+
       if (result < 0) throw new Error(`memory result ${result} < 0`);
-      await page.close();
     }
+    await page.close();
     await browser.close();
     return { error, warnings, result: results };
   } catch (e) {
