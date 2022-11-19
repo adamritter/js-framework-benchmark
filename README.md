@@ -178,7 +178,7 @@ cd webdriver-ts
 In the webdriver-ts directory issue the following command:
 
 ```
-npm run results
+NODE_OPTIONS=--openssl-legacy-provider npm run results
 ```
 
 Now a result table should have been created which can be opened on [http://localhost:8080/webdriver-ts-results/table.html](http://localhost:8080/webdriver-ts-results/table.html).
