@@ -34,12 +34,3 @@ features = [
 # [profile.release]
 # lto = true
 # panic = "abort"
-
-[dev-dependencies]
-criterion = "0.4"
-
-[[bench]]
-name = "bench"
-harness = false
-
-# js-framework-benchmark-wasm-bindgen = "*"
